@@ -1,0 +1,16 @@
+# Optional. Ollama's OpenAI-compatible endpoint ignores num_ctx sent in the
+# request body (verified on Ollama 0.32.14), so the only way to widen the
+# context window from a client is to bake it into a derived model:
+#
+#   ollama create packing-llama -f Modelfile
+#
+# Then set MODEL=packing-llama in .env.
+#
+# The agent is designed to work at Ollama's 4096 default — trip state is
+# re-rendered from disk each turn rather than carried in the transcript — so
+# this is a comfort upgrade, not a requirement.
+
+FROM llama3.1:8b
+
+PARAMETER num_ctx 16384
+PARAMETER temperature 0.2
