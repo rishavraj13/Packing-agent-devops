@@ -15,13 +15,18 @@ the harness imposes.
 from __future__ import annotations
 
 import json
+import logging
+import time
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
 from .models import CATEGORIES, Item, Trip, TripState
-from .store import Store, find_item
+from .store import Store, find_item, slugify
 from .weather import WeatherError, fetch_forecast
+from .observability import metrics
+
+logger = logging.getLogger(__name__)
 
 # OpenAI function-calling schemas. Kept small and flat: descriptions are short,
 # required args are minimal, and there are only three tools. Small models
@@ -292,13 +297,19 @@ def _set_trip(args: dict, state: TripState, store: Store, timeout: float) -> Too
     days = max(1, min(_as_int(args.get("days"), 5), 60))
 
     previous_city = state.trip.city if state.trip else None
+    old_trip_id = state.trip_id
     state.trip = Trip(city=city, trip_type=trip_type, start_date=start, days=days)
+
+    if previous_city is None and old_trip_id == "default":
+        state.trip_id = slugify(f"{city}-{trip_type}-{start}")
 
     # A different destination makes the stored forecast meaningless.
     if previous_city and previous_city.lower() != city.lower():
         state.forecast = None
 
     store.save(state)
+    if state.trip_id != old_trip_id:
+        store.delete(old_trip_id)
 
     tail = (
         "A forecast is already on record."
@@ -306,7 +317,8 @@ def _set_trip(args: dict, state: TripState, store: Store, timeout: float) -> Too
         else "No forecast yet — call check_weather next."
     )
     return ToolOutcome(
-        f"Trip recorded: {city}, {trip_type}, {days} days from {start}. {tail}"
+        f"Trip recorded as '{state.trip_id}': {city}, {trip_type}, "
+        f"{days} days from {start}. {tail}"
     )
 
 
@@ -325,11 +337,17 @@ def _check_weather(
     days = state.trip.days if state.trip else 5
 
     try:
+        started = time.monotonic()
         forecast = fetch_forecast(city, start, days, timeout=timeout)
     except WeatherError as exc:
+        metrics.increment("weather_requests_failed_total")
+        logger.warning("weather_request_failed", extra={"event": "weather_request_failed", "error_type": type(exc).__name__, "duration_ms": round((time.monotonic() - started) * 1000)})
         # Deliberately not raised: the model reads this and reports honestly
         # rather than the turn dying on an exception.
         return ToolOutcome(str(exc), is_error=True)
+
+    metrics.increment("weather_requests_succeeded_total")
+    logger.info("weather_request_succeeded", extra={"event": "weather_request_succeeded", "duration_ms": round((time.monotonic() - started) * 1000)})
 
     state.forecast = forecast
     store.save(state)
@@ -433,14 +451,23 @@ def execute(
 ) -> ToolOutcome:
     handler = _HANDLERS.get(name)
     if handler is None:
+        metrics.increment("tool_calls_failed_total")
+        metrics.increment(f"tool_calls_{name}_failed_total")
         return ToolOutcome(
             f"No tool named {name!r}. Available tools: "
             f"{', '.join(sorted(TOOL_NAMES))}.",
             is_error=True,
         )
     try:
-        return handler(normalize_args(name, args or {}), state, store, timeout)
+        outcome = handler(normalize_args(name, args or {}), state, store, timeout)
+        outcome_name = "failed" if outcome.is_error else "succeeded"
+        metrics.increment(f"tool_calls_{outcome_name}_total")
+        metrics.increment(f"tool_calls_{name}_{outcome_name}_total")
+        return outcome
     except Exception as exc:  # last-resort net so one bad call cannot end the turn
+        metrics.increment("tool_calls_failed_total")
+        metrics.increment(f"tool_calls_{name}_failed_total")
+        logger.exception("tool_execution_failed", extra={"event": "tool_execution_failed", "tool": name})
         return ToolOutcome(
             f"{name} failed unexpectedly: {type(exc).__name__}: {exc}", is_error=True
         )

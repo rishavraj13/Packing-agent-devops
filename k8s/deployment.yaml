@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: packing-list-agent
+spec:
+  # JSON persistence is process-local: keep this at one replica.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: packing-list-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: packing-list-agent
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: agent
+          image: ghcr.io/abhinavkumar2124/packing-list-agent:v1.0.0
+          imagePullPolicy: Always
+          args: ["--observability-only"]
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: packing-list-agent-config
+            - secretRef:
+                name: packing-list-agent-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            # Conservative starting values; tune with observed workload.
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: packing-list-agent-data

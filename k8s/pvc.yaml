@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: packing-list-agent-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi

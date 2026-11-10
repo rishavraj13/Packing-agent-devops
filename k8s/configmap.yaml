@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: packing-list-agent-config
+data:
+  OPENAI_BASE_URL: "https://openrouter.ai/api/v1"
+  MODEL: "nvidia/nemotron-3.5-lightning:free"
+  DATA_DIR: "/data"
+  WEATHER_TIMEOUT: "20"
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+  OBSERVABILITY_ENABLED: "true"
+  OBSERVABILITY_HOST: "0.0.0.0"
+  OBSERVABILITY_PORT: "8080"

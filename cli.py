@@ -8,6 +8,8 @@ import sys
 from app.config import load_settings
 from app.engine import PackingAgent
 from app.models import CATEGORIES, Event, TripState
+from app.observability import configure_logging
+from app.health import ObservabilityServer
 from app.store import Store
 
 HELP = """
@@ -86,6 +88,8 @@ def main() -> int:
     parser.add_argument(
         "message", nargs="*", help="optional first message; omit for a bare prompt"
     )
+    parser.add_argument("--serve-observability", action="store_true", help="serve health and metrics alongside the CLI")
+    parser.add_argument("--observability-only", action="store_true", help="serve health and metrics without starting the CLI")
     args = parser.parse_args()
 
     try:
@@ -93,6 +97,25 @@ def main() -> int:
     except ValueError as exc:
         print(f"[config] {exc}", file=sys.stderr)
         return 2
+
+    configure_logging(settings.log_level, settings.log_format)
+
+    server = None
+    if settings.observability_enabled or args.serve_observability or args.observability_only:
+        try:
+            server = ObservabilityServer(settings.observability_host, settings.observability_port, settings.data_dir)
+            if args.observability_only:
+                try:
+                    server.serve_forever()
+                except KeyboardInterrupt:
+                    pass
+                finally:
+                    server.close()
+                return 0
+            server.start()
+        except OSError as exc:
+            print(f"[observability] could not start server: {exc}", file=sys.stderr)
+            return 2
 
     store = Store(settings.data_dir)
     agent = PackingAgent(settings, store=store)
@@ -103,63 +126,69 @@ def main() -> int:
 
     pending = " ".join(args.message).strip() or None
 
-    while True:
-        if pending is None:
-            try:
-                raw = input("\nyou> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                return 0
-        else:
-            raw, pending = pending, None
-            print(f"\nyou> {raw}")
+    try:
+        while True:
+            if pending is None:
+                try:
+                    raw = input("\nyou> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    return 0
+            else:
+                raw, pending = pending, None
+                print(f"\nyou> {raw}")
 
-        if not raw:
-            continue
+            if not raw:
+                continue
 
-        if raw.startswith("/"):
-            command, _, rest = raw.partition(" ")
-            command, rest = command.lower(), rest.strip()
+            if raw.startswith("/"):
+                command, _, rest = raw.partition(" ")
+                command, rest = command.lower(), rest.strip()
 
-            if command in ("/quit", "/exit", "/q"):
-                return 0
-            if command == "/help":
-                print(HELP)
-                continue
-            if command == "/list":
-                print_list(store.load(trip_id))
-                continue
-            if command == "/state":
-                print_state(store.load(trip_id))
-                continue
-            if command == "/trips":
-                trips = store.list_trips()
-                print("\n" + ("\n".join(f"  {t}" for t in trips) if trips else "  none"))
-                continue
-            if command == "/use":
-                if not rest:
-                    print("  usage: /use <name>")
+                if command in ("/quit", "/exit", "/q"):
+                    return 0
+                if command == "/help":
+                    print(HELP)
                     continue
-                trip_id = rest
-                print(f"  switched to trip '{trip_id}'")
-                continue
-            if command == "/reset":
-                print(
-                    f"  deleted '{trip_id}'"
-                    if store.delete(trip_id)
-                    else f"  nothing saved for '{trip_id}'"
-                )
-                continue
-            if command == "/check":
-                for event in agent.review(trip_id):
-                    render(event)
+                if command == "/list":
+                    print_list(store.load(trip_id))
+                    continue
+                if command == "/state":
+                    print_state(store.load(trip_id))
+                    continue
+                if command == "/trips":
+                    trips = store.list_trips()
+                    print("\n" + ("\n".join(f"  {t}" for t in trips) if trips else "  none"))
+                    continue
+                if command == "/use":
+                    if not rest:
+                        print("  usage: /use <name>")
+                        continue
+                    trip_id = rest
+                    print(f"  switched to trip '{trip_id}'")
+                    continue
+                if command == "/reset":
+                    print(
+                        f"  deleted '{trip_id}'"
+                        if store.delete(trip_id)
+                        else f"  nothing saved for '{trip_id}'"
+                    )
+                    continue
+                if command == "/check":
+                    for event in agent.review(trip_id):
+                        render(event)
+                    continue
+
+                print(f"  unknown command {command}. /help for the list.")
                 continue
 
-            print(f"  unknown command {command}. /help for the list.")
-            continue
-
-        for event in agent.send(trip_id, raw):
-            render(event)
+            for event in agent.send(trip_id, raw):
+                render(event)
+                if event.type == "state" and event.state is not None:
+                    trip_id = event.state.trip_id
+    finally:
+        if server:
+            server.close()
 
 
 if __name__ == "__main__":

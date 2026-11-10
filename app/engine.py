@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -26,6 +27,10 @@ from .config import Settings
 from .models import ChatTurn, Event, TripState
 from .store import Store, render_state_block
 from .tools import TOOL_SCHEMAS, ToolOutcome, execute, parse_arguments
+from .observability import metrics
+import logging
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a packing-list agent. You decide what to pack by \
 reasoning about real forecast data, never from a generic list.
@@ -144,6 +149,7 @@ class PackingAgent:
     def send(self, trip_id: str, user_message: str) -> Iterator[Event]:
         """Handle one user message. Yields events as work happens."""
         with self._locks.get(trip_id):
+            metrics.increment("turns_total")
             state = self.store.load(trip_id)
             yield Event(type="user_message", text=user_message)
             yield from self._run(state, user_message, persist_user_turn=True)
@@ -156,6 +162,7 @@ class PackingAgent:
         belongs in them* — which is the split that keeps this agentic.
         """
         with self._locks.get(trip_id):
+            metrics.increment("turns_total")
             state = self.store.load(trip_id)
             if state.trip is None:
                 yield Event(
@@ -211,6 +218,7 @@ class PackingAgent:
 
         for iteration in range(1, self.settings.max_iterations + 1):
             try:
+                call_started = time.monotonic()
                 response = self.client.chat.completions.create(
                     model=self.settings.model,
                     messages=messages,
@@ -219,6 +227,8 @@ class PackingAgent:
                     max_tokens=self.settings.max_tokens,
                 )
             except openai.APIConnectionError as exc:
+                metrics.increment("model_calls_failed_total")
+                logger.warning("model_call_failed", extra={"event": "model_call_failed", "trip_id": state.trip_id, "error_type": type(exc).__name__})
                 yield Event(
                     type="error",
                     text=(
@@ -228,16 +238,23 @@ class PackingAgent:
                 )
                 return
             except openai.APIStatusError as exc:
+                metrics.increment("model_calls_failed_total")
+                logger.warning("model_call_failed", extra={"event": "model_call_failed", "trip_id": state.trip_id, "status_code": exc.status_code})
                 yield Event(
                     type="error",
                     text=f"Model returned HTTP {exc.status_code}: {exc.message}",
                 )
                 return
             except openai.OpenAIError as exc:
+                metrics.increment("model_calls_failed_total")
+                logger.warning("model_call_failed", extra={"event": "model_call_failed", "trip_id": state.trip_id, "error_type": type(exc).__name__})
                 yield Event(
                     type="error", text=f"{exc.__class__.__name__}: {exc}"
                 )
                 return
+
+            metrics.increment("model_calls_succeeded_total")
+            logger.debug("model_call_succeeded", extra={"event": "model_call_succeeded", "trip_id": state.trip_id, "duration_ms": round((time.monotonic() - call_started) * 1000)})
 
             choice = response.choices[0]
             message = choice.message
@@ -365,7 +382,7 @@ class PackingAgent:
                         )
                     else:
                         outcome = execute(
-                            name, args or {}, state, self.store, timeout=20.0
+                            name, args or {}, state, self.store, timeout=self.settings.weather_timeout
                         )
                         executed[key] = outcome
 
@@ -393,6 +410,8 @@ class PackingAgent:
                     }
                 )
         else:
+            metrics.increment("agent_iteration_limits_total")
+            logger.warning("agent_iteration_limit_reached", extra={"event": "agent_iteration_limit_reached", "trip_id": state.trip_id})
             yield Event(
                 type="warning",
                 text=(

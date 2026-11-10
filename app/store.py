@@ -9,12 +9,15 @@ chat transcript surviving.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 
 from .models import Item, TripState, now_iso
+from .observability import metrics
 
 _SAFE = re.compile(r"[^a-z0-9_-]+")
+logger = logging.getLogger(__name__)
 
 
 def slugify(text: str) -> str:
@@ -25,7 +28,12 @@ def slugify(text: str) -> str:
 class Store:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = Path(data_dir)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            metrics.increment("store_failures_total")
+            logger.exception("store_initialization_failed", extra={"event": "store_initialization_failed"})
+            raise
 
     def path_for(self, trip_id: str) -> Path:
         return self.data_dir / f"{slugify(trip_id)}.json"
@@ -39,6 +47,8 @@ class Store:
         except Exception:
             # A corrupt file should not brick the session. Move it aside so
             # the user can inspect it, and start clean.
+            metrics.increment("store_read_failures_total")
+            logger.warning("store_state_corrupt", extra={"event": "store_state_corrupt", "trip_id": slugify(trip_id)})
             path.replace(path.with_suffix(".json.corrupt"))
             return TripState(trip_id=trip_id)
 
@@ -46,10 +56,15 @@ class Store:
         state.updated_at = now_iso()
         path = self.path_for(state.trip_id)
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            state.model_dump_json(indent=2, exclude_none=True), encoding="utf-8"
-        )
-        tmp.replace(path)
+        try:
+            tmp.write_text(
+                state.model_dump_json(indent=2, exclude_none=True), encoding="utf-8"
+            )
+            tmp.replace(path)
+        except OSError:
+            metrics.increment("store_write_failures_total")
+            logger.exception("store_save_failed", extra={"event": "store_save_failed", "trip_id": slugify(state.trip_id)})
+            raise
 
     def list_trips(self) -> list[str]:
         return sorted(p.stem for p in self.data_dir.glob("*.json"))

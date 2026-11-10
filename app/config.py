@@ -22,6 +22,12 @@ class Settings:
     max_iterations: int
     data_dir: Path
     history_turns: int
+    weather_timeout: float
+    log_level: str
+    log_format: str
+    observability_enabled: bool
+    observability_host: str
+    observability_port: int
 
 
 def _str(key: str, default: str) -> str:
@@ -39,6 +45,25 @@ def _num(key: str, default: float, cast):
         raise ValueError(f"{key} in .env is not a valid number: {raw!r}") from exc
 
 
+def _bool(key: str, default: bool) -> bool:
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{key} in .env must be true or false, got {raw!r}")
+
+
+def _choice(key: str, default: str, choices: set[str]) -> str:
+    value = _str(key, default).lower()
+    if value not in choices:
+        raise ValueError(f"{key} in .env must be one of {', '.join(sorted(choices))}")
+    return value
+
+
 def load_settings() -> Settings:
     data_dir = Path(_str("DATA_DIR", "./data")).expanduser()
     return Settings(
@@ -52,4 +77,10 @@ def load_settings() -> Settings:
         max_iterations=_num("MAX_ITERATIONS", 14, int),
         data_dir=data_dir,
         history_turns=_num("HISTORY_TURNS", 6, int),
+        weather_timeout=_num("WEATHER_TIMEOUT", 20, float),
+        log_level=_choice("LOG_LEVEL", "INFO", {"debug", "info", "warning", "error", "critical"}),
+        log_format=_choice("LOG_FORMAT", "json", {"json", "text"}),
+        observability_enabled=_bool("OBSERVABILITY_ENABLED", False),
+        observability_host=_str("OBSERVABILITY_HOST", "0.0.0.0"),
+        observability_port=_num("OBSERVABILITY_PORT", 8080, int),
     )

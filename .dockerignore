@@ -1,0 +1,13 @@
+.env
+data/
+.git/
+.github/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+tests/
+docs/
+k8s/

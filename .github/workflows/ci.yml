@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: pytest
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: .pytest_cache
+          if-no-files-found: ignore
+      - run: docker build --tag packing-list-agent:ci .
