@@ -120,7 +120,10 @@ Or set `OLLAMA_KEEP_ALIVE=60m` in the server's environment.
 | `/help`, `/quit` | |
 
 `python cli.py --trip iceland "5 days in Reykjavik, hiking"` seeds the first
-message and selects a trip file.
+message and selects a trip file. When started with the default trip ID, a new
+trip is saved with a name based on its destination, type, and start date, such
+as `reykjavik-hiking-2026-08-27`. Use `/use <name>` to switch between saved
+trips.
 
 ## Architecture
 
@@ -181,3 +184,87 @@ interface. At that point also move the lock to the database (row lock or
 `SELECT … FOR UPDATE`) and the transcript to Redis, since both are currently
 per-process.
 
+## Testing
+
+The automated suite is deterministic: it uses temporary directories and fakes
+for the model and HTTP clients, so it needs no Ollama server, API key, or
+internet connection.
+
+```bash
+python -m pip install -r requirements-dev.txt
+pytest
+```
+
+## Logging and observability
+
+Normal CLI output remains on stdout. Operational logs go to stderr and default
+to JSON. Configure `LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR`, or
+`CRITICAL`) and `LOG_FORMAT` (`json` or `text`). Logs deliberately exclude API
+keys, authorization headers, prompts, and environment values.
+
+The optional standard-library HTTP server is disabled by default. Start it on
+its own with `python cli.py --observability-only`, or alongside the CLI with
+`python cli.py --serve-observability`. It exposes `/healthz`, `/readyz`, and
+Prometheus-format `/metrics`. Readiness only checks local writable storage; it
+does not issue a model inference or weather request.
+
+## Docker
+
+Build with an explicit local tag:
+
+```bash
+docker build -t packing-list-agent:local .
+docker run --rm -it --env-file .env -v packing-data:/data packing-list-agent:local
+```
+
+`DATA_DIR` defaults to `/data` in the image and should be mounted for persistent
+trips. The model endpoint remains external; for example pass
+`-e OPENAI_BASE_URL=https://model.example/v1 -e OPENAI_API_KEY=...` through your
+secret-injection mechanism. Do not put secrets in image layers. Run health mode
+with `docker run --rm -p 8080:8080 --env-file .env packing-list-agent:local --observability-only`.
+
+Images published by the release workflow use `ghcr.io/<owner>/<repository>:vX.Y.Z`
+and `:sha-<commit>` tags. Repository owners must allow GitHub Actions packages
+write access; forks normally cannot publish with the built-in token.
+
+## CI/CD
+
+`.github/workflows/ci.yml` runs deterministic tests and verifies the Docker
+build on pull requests and pushes to `main`, with no production secrets. The
+separate publishing workflow runs only for `v*` tags or manual dispatch and
+publishes to GHCR; it never deploys infrastructure.
+
+## Kubernetes
+
+`k8s/` is a single-replica baseline, not production certification. Set the
+image and non-secret endpoint configuration, create the real secret outside
+source control, then render it locally:
+
+```bash
+kubectl kustomize k8s
+kubectl apply --dry-run=client -k k8s
+```
+
+The cluster needs outbound access to both the configured model endpoint and
+Open-Meteo. JSON state requires a persistent volume and **one replica** until
+shared storage and concurrency are deliberately designed. Kubernetes Secrets
+are base64-encoded rather than encrypted by default; use a genuine secret
+manager in production. See `docs/operations.md` for operational guidance.
+
+## Configuration reference
+
+Existing model settings remain environment-based: `OPENAI_BASE_URL`,
+`OPENAI_API_KEY`, `MODEL`, `TEMPERATURE`, `MAX_TOKENS`, `REQUEST_TIMEOUT`,
+`MAX_ITERATIONS`, `HISTORY_TURNS`, and `DATA_DIR`. Operational additions are
+`WEATHER_TIMEOUT`, `LOG_LEVEL`, `LOG_FORMAT`, `OBSERVABILITY_ENABLED`,
+`OBSERVABILITY_HOST`, and `OBSERVABILITY_PORT`.
+
+## Release notes
+
+### DevOps/SRE baseline
+
+Added deterministic pytest coverage, structured logging, opt-in health and
+metrics endpoints, Docker packaging, GitHub Actions CI/GHCR publishing, an
+operations runbook, and conservative Kubernetes starting manifests.
+#   P a c k i n g - a g e n t - d e v o p s  
+ 
